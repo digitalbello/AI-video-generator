@@ -1,18 +1,13 @@
 import os
-import asyncio
 import requests
 import tempfile
 import shutil
 import random
 import json
 import streamlit as st
-import edge_tts
-import nest_asyncio
+import subprocess
 from groq import Groq
 from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
-
-# --- Safety: Apply nest_asyncio for cloud environments ---
-nest_asyncio.apply()
 
 # --- Safety: Verify FFmpeg is available ---
 if not shutil.which("ffmpeg"):
@@ -49,22 +44,30 @@ def extract_keywords(script):
     )
     
     raw = completion.choices[0].message.content.strip()
-    # Remove markdown code blocks if present
     raw = raw.replace("```json", "").replace("```", "").strip()
     data = json.loads(raw)
     return list(data.values())
 
-# --- Audio Generation (Async-safe for cloud) ---
-async def _generate_audio(text, output_path):
-    communicate = edge_tts.Communicate(text, "en-US-AriaNeural")
-    await communicate.save(output_path)
-
+# --- Audio Generation (Using edge-tts CLI - NO ASYNC) ---
 def generate_audio_sync(text, output_path):
-    try:
-        loop = asyncio.get_running_loop()
-        loop.run_until_complete(_generate_audio(text, output_path))
-    except RuntimeError:
-        asyncio.run(_generate_audio(text, output_path))
+    """Use edge-tts command line tool to avoid async issues."""
+    import subprocess
+    import sys
+    
+    cmd = [
+        sys.executable, "-m", "edge_tts",
+        "--text", text,
+        "--voice", "en-US-AriaNeural",
+        "--write-media", output_path
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"edge-tts failed: {result.stderr}")
+    
+    if not os.path.exists(output_path):
+        raise RuntimeError("Audio file was not created.")
 
 # --- Stock Video Fetching (Direct Pexels API) ---
 def get_stock_videos(keywords):
@@ -84,10 +87,8 @@ def get_stock_videos(keywords):
             videos = data.get("videos", [])
             
             if videos:
-                # Pick first video, prefer SD quality for faster processing
                 video_files = videos[0].get("video_files", [])
                 if video_files:
-                    # Try to find SD quality, fallback to first available
                     sd_file = next(
                         (f for f in video_files if f.get("quality") == "sd"), 
                         video_files[0]
@@ -156,7 +157,6 @@ if st.button("🚀 Generate Video", type="primary"):
                         f.write(vid_response.content)
                     
                     v_clip = VideoFileClip(temp.name)
-                    # Subclip to equal duration segments
                     max_duration = min(time_per_clip, v_clip.duration)
                     v_clip = v_clip.subclip(0, max_duration)
                     clips.append(crop_and_resize(v_clip, tw, th))
@@ -176,7 +176,6 @@ if st.button("🚀 Generate Video", type="primary"):
                 )
                 temp_files.append(output_path)
                 
-                # Close clips to free memory
                 audio_clip.close()
                 for c in clips:
                     c.close()
@@ -197,11 +196,9 @@ if st.button("🚀 Generate Video", type="primary"):
             st.error(f"❌ Error: {str(e)}")
             st.exception(e)
         finally:
-            # Cleanup temp files
             for f in temp_files:
                 try:
                     if os.path.exists(f):
                         os.remove(f)
                 except:
                     pass
-    
