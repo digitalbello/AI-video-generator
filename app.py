@@ -143,6 +143,22 @@ def download_music(url, output_path):
     with open(output_path, "wb") as f:
         f.write(response.content)
 
+# --- Find available font on Linux ---
+def get_available_font():
+    """Find a font file that exists on the current system."""
+    font_paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    for path in font_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
 # --- UI ---
 st.set_page_config(page_title="AI Video Generator", page_icon="🎬")
 st.title("🎬 AI Video Generator")
@@ -259,24 +275,30 @@ if st.button("🚀 Generate Video", type="primary"):
                 # Add captions
                 if add_captions and captions:
                     caption_clips = []
+                    font_path = get_available_font()
+                    
                     for cap in captions:
                         txt = cap["text"]
                         start = cap["start"]
                         end = cap["end"]
                         duration = end - start
                         
-                        # Caption text - FIXED FONT
-                        txt_clip = TextClip(
-                            text=txt,
-                            font="DejaVu-Sans",
-                            font_size=60,
-                            color="white",
-                            stroke_color="black",
-                            stroke_width=3,
-                            size=(tw - 100, None),
-                            method="caption",
-                            text_align="center"
-                        )
+                        # Build TextClip kwargs - font is optional
+                        txt_kwargs = {
+                            "text": txt,
+                            "font_size": 60,
+                            "color": "white",
+                            "stroke_color": "black",
+                            "stroke_width": 3,
+                            "size": (tw - 100, None),
+                            "method": "caption",
+                            "text_align": "center"
+                        }
+                        # Only add font if we found a valid font file
+                        if font_path:
+                            txt_kwargs["font"] = font_path
+                        
+                        txt_clip = TextClip(**txt_kwargs)
                         txt_clip = txt_clip.with_duration(duration)
                         txt_clip = txt_clip.with_start(start)
                         txt_clip = txt_clip.with_position(("center", th * 0.75))
