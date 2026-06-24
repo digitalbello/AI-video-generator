@@ -1,7 +1,6 @@
 streamlit
 groq
 edge-tts
-moviepy==1.0.3
+moviepy==2.1.2
 requests
 imageio-ffmpeg
-pillow==9.5.0
