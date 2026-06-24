@@ -265,10 +265,10 @@ if st.button("🚀 Generate Video", type="primary"):
                         end = cap["end"]
                         duration = end - start
                         
-                        # Caption text
+                        # Caption text - FIXED FONT
                         txt_clip = TextClip(
                             text=txt,
-                            font="Arial-Bold",
+                            font="DejaVu-Sans",
                             font_size=60,
                             color="white",
                             stroke_color="black",
@@ -344,3 +344,4 @@ if st.button("🚀 Generate Video", type="primary"):
                         os.remove(f)
                 except:
                     pass
+    
