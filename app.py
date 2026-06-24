@@ -7,7 +7,7 @@ import json
 import streamlit as st
 import subprocess
 from groq import Groq
-from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
+from moviepy import VideoFileClip, AudioFileClip, concatenate_videoclips
 
 # --- Safety: Verify FFmpeg is available ---
 if not shutil.which("ffmpeg"):
@@ -38,7 +38,7 @@ def extract_keywords(script):
     Script: {script}
     """
     completion = client.chat.completions.create(
-        model="llama-3.1-8b-instant",  # <-- CHANGED FROM llama3-8b-8192
+        model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.5
     )
@@ -103,10 +103,10 @@ def get_stock_videos(keywords):
 # --- Video Processing ---
 def crop_and_resize(clip, w, h):
     scale = max(w / clip.w, h / clip.h)
-    clip = clip.resize(scale)
+    clip = clip.resized(scale)
     x1 = (clip.w - w) / 2
     y1 = (clip.h - h) / 2
-    return clip.crop(x1=x1, y1=y1, width=w, height=h)
+    return clip.cropped(x1=x1, y1=y1, width=w, height=h)
 
 # --- UI ---
 st.set_page_config(page_title="AI Video Generator", page_icon="🎬")
@@ -158,21 +158,19 @@ if st.button("🚀 Generate Video", type="primary"):
                     
                     v_clip = VideoFileClip(temp.name)
                     max_duration = min(time_per_clip, v_clip.duration)
-                    v_clip = v_clip.subclip(0, max_duration)
+                    v_clip = v_clip.subclipped(0, max_duration)
                     clips.append(crop_and_resize(v_clip, tw, th))
                 
                 # Concatenate and add audio
                 final = concatenate_videoclips(clips, method="compose")
-                final = final.set_audio(audio_clip)
+                final = final.with_audio(audio_clip)
                 
                 output_path = "output.mp4"
                 final.write_videofile(
                     output_path, 
                     fps=24, 
                     codec="libx264", 
-                    audio_codec="aac",
-                    temp_audiofile="temp-audio.m4a",
-                    remove_temp=True
+                    audio_codec="aac"
                 )
                 temp_files.append(output_path)
                 
@@ -202,4 +200,4 @@ if st.button("🚀 Generate Video", type="primary"):
                         os.remove(f)
                 except:
                     pass
-        
+    
