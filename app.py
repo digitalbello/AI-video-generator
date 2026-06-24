@@ -38,7 +38,7 @@ def extract_keywords(script):
     Script: {script}
     """
     completion = client.chat.completions.create(
-        model="llama3-8b-8192",
+        model="llama-3.1-8b-instant",  # <-- CHANGED FROM llama3-8b-8192
         messages=[{"role": "user", "content": prompt}],
         temperature=0.5
     )
@@ -202,3 +202,4 @@ if st.button("🚀 Generate Video", type="primary"):
                         os.remove(f)
                 except:
                     pass
+        
