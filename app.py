@@ -9,9 +9,10 @@ import streamlit as st
 import subprocess
 from groq import Groq
 from moviepy import (
-    ImageClip, AudioFileClip, concatenate_videoclips,
+    ImageClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
     TextClip, CompositeVideoClip, ColorClip
 )
+
 from moviepy.video.fx import CrossFadeIn, CrossFadeOut
 
 # --- Safety: Verify FFmpeg is available ---
