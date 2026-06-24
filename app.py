@@ -12,7 +12,6 @@ from moviepy import (
     ImageClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
     TextClip, CompositeVideoClip, ColorClip
 )
-
 from moviepy.video.fx import CrossFadeIn, CrossFadeOut
 
 # --- Safety: Verify FFmpeg is available ---
@@ -345,4 +344,3 @@ if st.button("🚀 Generate Video", type="primary"):
                         os.remove(f)
                 except:
                     pass
-    
