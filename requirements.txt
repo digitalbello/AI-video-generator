@@ -1,6 +1,7 @@
 streamlit
 groq
 edge-tts
-moviepy==1.0.3
+moviepy>=2.0.0
 pexels_py
 requests
+imageio[ffmpeg]
