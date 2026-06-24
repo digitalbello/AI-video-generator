@@ -1,75 +1,207 @@
-import streamlit as st
-import requests
-import asyncio
-import edge_tts
-from groq import Groq
-import json
 import os
+import asyncio
+import requests
+import tempfile
+import shutil
+import random
+import json
+import streamlit as st
+import edge_tts
+import nest_asyncio
+from groq import Groq
+from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips
 
-# API Keys
-GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-PEXELS_API_KEY = st.secrets["PEXELS_API_KEY"]
+# --- Safety: Apply nest_asyncio for cloud environments ---
+nest_asyncio.apply()
+
+# --- Safety: Verify FFmpeg is available ---
+if not shutil.which("ffmpeg"):
+    st.warning("⚠️ System FFmpeg not found in PATH. Will try imageio-ffmpeg fallback.")
+
+# --- Get API keys from Streamlit Cloud Secrets ---
+try:
+    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+    PEXELS_API_KEY = st.secrets["PEXELS_API_KEY"]
+except KeyError as e:
+    st.error(f"❌ Missing secret: {e}. Please add it in Streamlit Cloud Settings → Secrets.")
+    st.stop()
 
 RATIOS = {
-    "9:16 (TikTok/Shorts)": {"width": 1080, "height": 1920},
-    "16:9 (YouTube)": {"width": 1920, "height": 1080},
-    "1:1 (Instagram)": {"width": 1080, "height": 1080}
+    "9:16 (TikTok/Shorts)": (1080, 1920),
+    "16:9 (YouTube)": (1920, 1080),
+    "1:1 (Instagram)": (1080, 1080)
 }
 
+# --- Keyword Extraction ---
 def extract_keywords(script):
     client = Groq(api_key=GROQ_API_KEY)
-    prompt = f"Extract 3 visual keywords from: {script}. Return JSON array only."
+    prompt = f"""
+    Extract exactly 3 simple visual keywords from the following script.
+    Return ONLY a valid JSON object with keys "keyword1", "keyword2", "keyword3".
+    Do not include any markdown formatting or explanation.
+    
+    Script: {script}
+    """
     completion = client.chat.completions.create(
         model="llama3-8b-8192",
         messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"}
+        temperature=0.5
     )
-    data = json.loads(completion.choices[0].message.content)
-    return list(data.values())[0] if isinstance(data, dict) else data
+    
+    raw = completion.choices[0].message.content.strip()
+    # Remove markdown code blocks if present
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    data = json.loads(raw)
+    return list(data.values())
 
-def search_pexels(query, api_key):
-    headers = {"Authorization": api_key}
-    url = f"https://api.pexels.com/videos/search?query={query}&per_page=3"
+# --- Audio Generation (Async-safe for cloud) ---
+async def _generate_audio(text, output_path):
+    communicate = edge_tts.Communicate(text, "en-US-AriaNeural")
+    await communicate.save(output_path)
+
+def generate_audio_sync(text, output_path):
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        videos = resp.json().get("videos", [])
-        if videos:
-            return videos[0]["video_files"][-1]["link"]
-    except:
-        pass
-    return None
+        loop = asyncio.get_running_loop()
+        loop.run_until_complete(_generate_audio(text, output_path))
+    except RuntimeError:
+        asyncio.run(_generate_audio(text, output_path))
 
-async def generate_audio(text, output):
-    comm = edge_tts.Communicate(text, "en-US-ChristopherNeural")
-    await comm.save(output)
+# --- Stock Video Fetching (Direct Pexels API) ---
+def get_stock_videos(keywords):
+    urls = []
+    headers = {"Authorization": PEXELS_API_KEY}
+    
+    for kw in keywords:
+        try:
+            response = requests.get(
+                "https://api.pexels.com/videos/search",
+                headers=headers,
+                params={"query": kw, "per_page": 5},
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            videos = data.get("videos", [])
+            
+            if videos:
+                # Pick first video, prefer SD quality for faster processing
+                video_files = videos[0].get("video_files", [])
+                if video_files:
+                    # Try to find SD quality, fallback to first available
+                    sd_file = next(
+                        (f for f in video_files if f.get("quality") == "sd"), 
+                        video_files[0]
+                    )
+                    urls.append(sd_file["link"])
+        except Exception as e:
+            st.warning(f"⚠️ Could not fetch video for keyword '{kw}': {e}")
+            continue
+    
+    return urls
 
-st.title("🎬 AI Video Creator")
-st.write("⚠️ Note: This creates audio + video links. Download separately and edit in CapCut/InShot")
+# --- Video Processing ---
+def crop_and_resize(clip, w, h):
+    scale = max(w / clip.w, h / clip.h)
+    clip = clip.resize(scale)
+    x1 = (clip.w - w) / 2
+    y1 = (clip.h - h) / 2
+    return clip.crop(x1=x1, y1=y1, width=w, height=h)
 
-script = st.text_area("📝 Script:", height=150)
-ratio = st.selectbox("📐 Ratio:", list(RATIOS.keys()))
+# --- UI ---
+st.set_page_config(page_title="AI Video Generator", page_icon="🎬")
+st.title("🎬 AI Video Generator")
 
-if st.button("🚀 Generate", type="primary"):
-    if script:
-        with st.spinner("Thinking..."):
-            keywords = extract_keywords(script)
-            st.success(f"Keywords: {', '.join(keywords)}")
-        
-        with st.spinner("Voice..."):
-            asyncio.run(generate_audio(script, "audio.mp3"))
-            st.audio("audio.mp3")
-            with open("audio.mp3", "rb") as f:
-                st.download_button("⬇️ Download Audio", f, "audio.mp3")
-        
-        with st.spinner("Finding videos..."):
-            video_links = []
-            for kw in keywords:
-                url = search_pexels(kw, PEXELS_API_KEY)
-                if url:
-                    video_links.append((kw, url))
-                    st.video(url)
-                    st.markdown(f"**{kw}**: [Download]({url})")
-        
-        st.info("💡 Tip: Download audio + videos, then combine in CapCut (free mobile app)")
+script = st.text_area("📝 Paste your script here:", height=150)
+ratio = st.selectbox("📐 Select Ratio:", list(RATIOS.keys()))
+
+if st.button("🚀 Generate Video", type="primary"):
+    if not script.strip():
+        st.error("Please enter a script!")
     else:
-        st.error("Enter a script!")
+        temp_files = []
+        try:
+            # Step 1: Extract keywords
+            with st.spinner("🧠 AI is analyzing script..."):
+                keywords = extract_keywords(script)
+                st.write(f"**Visuals:** {', '.join(keywords)}")
+            
+            # Step 2: Generate voice
+            with st.spinner("🎙️ Generating voice..."):
+                audio_path = "voice.mp3"
+                generate_audio_sync(script, audio_path)
+                temp_files.append(audio_path)
+            
+            # Step 3: Fetch stock videos
+            with st.spinner("🎬 Fetching stock footage..."):
+                vid_urls = get_stock_videos(keywords)
+                if not vid_urls:
+                    st.error("❌ No stock videos found. Try a different script.")
+                    st.stop()
+                st.write(f"**Found {len(vid_urls)} video clips**")
+            
+            # Step 4: Edit video
+            with st.spinner("✂️ Editing video..."):
+                tw, th = RATIOS[ratio]
+                audio_clip = AudioFileClip(audio_path)
+                time_per_clip = audio_clip.duration / len(vid_urls)
+                
+                clips = []
+                for i, url in enumerate(vid_urls):
+                    temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                    temp_files.append(temp.name)
+                    
+                    with open(temp.name, "wb") as f:
+                        vid_response = requests.get(url, timeout=30)
+                        vid_response.raise_for_status()
+                        f.write(vid_response.content)
+                    
+                    v_clip = VideoFileClip(temp.name)
+                    # Subclip to equal duration segments
+                    max_duration = min(time_per_clip, v_clip.duration)
+                    v_clip = v_clip.subclip(0, max_duration)
+                    clips.append(crop_and_resize(v_clip, tw, th))
+                
+                # Concatenate and add audio
+                final = concatenate_videoclips(clips, method="compose")
+                final = final.set_audio(audio_clip)
+                
+                output_path = "output.mp4"
+                final.write_videofile(
+                    output_path, 
+                    fps=24, 
+                    codec="libx264", 
+                    audio_codec="aac",
+                    temp_audiofile="temp-audio.m4a",
+                    remove_temp=True
+                )
+                temp_files.append(output_path)
+                
+                # Close clips to free memory
+                audio_clip.close()
+                for c in clips:
+                    c.close()
+                final.close()
+            
+            st.success("✅ Done!")
+            st.video(output_path)
+            
+            with open(output_path, "rb") as f:
+                st.download_button(
+                    "⬇️ Download Video", 
+                    data=f, 
+                    file_name="ai_video.mp4",
+                    mime="video/mp4"
+                )
+                
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+            st.exception(e)
+        finally:
+            # Cleanup temp files
+            for f in temp_files:
+                try:
+                    if os.path.exists(f):
+                        os.remove(f)
+                except:
+                    pass
+    
