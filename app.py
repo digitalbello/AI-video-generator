@@ -643,15 +643,19 @@ if st.button("🚀 Generate Cinematic Video", type="primary"):
                 final.close()
             
             st.success("✅ Your cinematic video is ready! 🎬")
-            st.video(output_path)
             
-            with open(output_path, "rb") as f:
-                st.download_button(
-                    "⬇️ Download Cinematic Video",
-                    data=f,
-                    file_name="cinematic_ai_video.mp4",
-                    mime="video/mp4"
-                )
+            # Read video as bytes for Streamlit display
+            with open(output_path, "rb") as video_file:
+                video_bytes = video_file.read()
+            st.video(video_bytes)
+            
+            st.download_button(
+                "⬇️ Download Cinematic Video",
+                data=video_bytes,
+                file_name="cinematic_ai_video.mp4",
+                mime="video/mp4"
+            )
+
                 
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
