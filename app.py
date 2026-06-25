@@ -395,3 +395,4 @@ st.markdown("🧠 **Intelligent Cinematic Mode**: Paste your script with scene d
 
 st.markdown("""
 **Script Format Example:**
+        
