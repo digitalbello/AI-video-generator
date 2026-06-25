@@ -11,7 +11,8 @@ import streamlit as st
 import subprocess
 from groq import Groq
 from moviepy import (
-    ImageClip, AudioFileClip, concatenate_videoclips, concatenate_audioclips,
+    ImageClip, AudioFileClip, concatenate_videoclips,
+    concatenate_audioclips,
     TextClip, CompositeVideoClip, ColorClip, VideoClip
 )
 from moviepy.video.fx import CrossFadeIn, CrossFadeOut
@@ -41,7 +42,6 @@ def parse_script(raw_script):
     Returns list of scenes with metadata.
     """
     scenes = []
-    
     # Split by SCENE headers
     scene_blocks = re.split(r'\n(?=SCENE\s+\d+)', raw_script.strip())
     
@@ -55,9 +55,9 @@ def parse_script(raw_script):
         block = block.strip()
         if not block:
             continue
-            
+        
         # Extract scene name/timing
-        scene_header = re.match(r'SCENE\s+\d+\s*[-\u2013\u2014]\s*(.+?)\s*\(([^)]+)\)', block)
+        scene_header = re.match(r'SCENE\s+\d+\s*[-–—]\s*(.+?)\s*\(([^)]+)\)', block)
         scene_name = scene_header.group(1).strip() if scene_header else "Scene"
         timing = scene_header.group(2).strip() if scene_header else "0-5s"
         
@@ -73,7 +73,7 @@ def parse_script(raw_script):
         emotion = extract_emotion(visual_direction)
         
         # Parse timing
-        timing_parts = timing.replace("s", "").split("\u2013")
+        timing_parts = timing.replace("s", "").split("–")
         if len(timing_parts) == 2:
             start_time = float(timing_parts[0].strip())
             end_time = float(timing_parts[1].strip())
@@ -95,15 +95,18 @@ def parse_script(raw_script):
     
     # If no scenes parsed, treat entire script as one scene
     if not scenes and raw_script.strip():
+        raw_text = raw_script.strip()
+        # Extract first sentence or first 80 chars for visual direction
+        first_sentence = re.split(r'[.!?]', raw_text)[0] if re.search(r'[.!?]', raw_text) else raw_text[:80]
         scenes.append({
             "name": "Main Scene",
             "timing": "0-10s",
             "start": 0,
             "duration": 10,
-            "visual_direction": raw_script.strip()[:100],
-            "voiceover": raw_script.strip(),
+            "visual_direction": first_sentence[:100],
+            "voiceover": raw_text,
             "emotion": "neutral",
-            "full_text": raw_script.strip()
+            "full_text": raw_text
         })
     
     return scenes, intro_text
@@ -119,69 +122,167 @@ def extract_emotion(direction):
         "sad": ["dark", "gloomy", "staring", "bills", "worried", "stress"],
         "exciting": ["zoom", "dynamic", "energy", "action", "movement"]
     }
-    
     for emotion, keywords in emotions.items():
         if any(kw in direction_lower for kw in keywords):
             return emotion
     return "neutral"
 
 # ============ AI IMAGE GENERATION ============
-def generate_ai_image(prompt, width=1024, height=1024, seed=None):
-    """Generate an image using Pollinations.ai free API."""
+
+def generate_ai_image(prompt, width=1024, height=1024, seed=None, max_retries=3):
+    """
+    Generate an image using Pollinations.ai free API.
+    Added retry logic with exponential backoff for 429 errors.
+    """
     if seed is None:
         seed = random.randint(1, 999999)
+    
+    # Hard cap prompt length to prevent URL too long / 429 errors
+    MAX_PROMPT_LEN = 250
+    if len(prompt) > MAX_PROMPT_LEN:
+        prompt = prompt[:MAX_PROMPT_LEN].rsplit(' ', 1)[0]
     
     encoded_prompt = requests.utils.quote(prompt)
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&nologo=true"
     
-    response = requests.get(url, timeout=60)
-    response.raise_for_status()
-    return response.content
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, timeout=60)
+            if response.status_code == 429:
+                wait_time = 2 ** attempt
+                st.warning(f"⏳ Rate limited (429). Retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+                continue
+            response.raise_for_status()
+            return response.content
+        except requests.exceptions.RequestException as e:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(1)
+    
+    raise RuntimeError("Max retries exceeded for image generation")
 
 def build_image_prompt(scene, script_theme):
-    """Build an emotionally rich image prompt from scene data."""
+    """
+    Build an emotionally rich image prompt from scene data.
+    Ensures prompt stays concise and under API limits.
+    """
     emotion_keywords = {
-        "urgent": "dynamic motion blur, high energy, dramatic lighting, cinematic action",
-        "calm": "soft golden hour lighting, peaceful atmosphere, serene composition, gentle colors",
-        "dramatic": "high contrast, dramatic shadows, cinematic lighting, intense atmosphere, film noir",
-        "hopeful": "warm sunrise glow, bright optimistic lighting, golden rays, uplifting colors",
-        "sad": "moody desaturated tones, soft melancholic lighting, emotional depth, cinematic drama",
-        "exciting": "fast motion, dynamic angle, energetic composition, vibrant colors, action shot",
-        "neutral": "professional photography, cinematic composition, high quality, 4k detailed"
+        "urgent": "dynamic motion blur, high energy, dramatic lighting",
+        "calm": "soft golden hour, peaceful, serene",
+        "dramatic": "high contrast, dramatic shadows, film noir",
+        "hopeful": "warm sunrise, bright, uplifting",
+        "sad": "moody desaturated, melancholic, emotional",
+        "exciting": "fast motion, dynamic angle, vibrant",
+        "neutral": "professional photography, cinematic, 4k"
     }
     
-    base = scene["visual_direction"]
+    base = scene.get("visual_direction", "")
     emotion = scene.get("emotion", "neutral")
     emotion_style = emotion_keywords.get(emotion, emotion_keywords["neutral"])
     
-    prompt = f"{base}, {emotion_style}, professional cinematography, photorealistic, 8k quality, film grain, color graded"
+    prompt = f"{base}, {emotion_style}, photorealistic"
+    
+    # Final safety trim
+    if len(prompt) > 250:
+        prompt = prompt[:250].rsplit(' ', 1)[0]
     
     return prompt
 
-def generate_scene_images(scenes):
+def generate_scene_images(scenes, custom_prompts=None):
     """Generate AI images for each scene with emotion-aware prompts."""
     images = []
-    
     for i, scene in enumerate(scenes):
         try:
             st.write(f"🎨 Generating scene {i+1}/{len(scenes)}: **{scene['name']}** ({scene['emotion']})")
             
-            prompt = build_image_prompt(scene, "")
-            img_data = generate_ai_image(prompt, width=1024, height=1024, seed=random.randint(1, 999999))
+            # Use custom prompt if user edited it, otherwise build default
+            if custom_prompts and i < len(custom_prompts) and custom_prompts[i].strip():
+                prompt = custom_prompts[i].strip()
+            else:
+                prompt = build_image_prompt(scene, "")
             
+            st.caption(f"📝 Prompt: {prompt[:120]}...")
+            
+            img_data = generate_ai_image(prompt, width=1024, height=1024, seed=random.randint(1, 999999))
             temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_scene_{i}.png")
             temp.write(img_data)
             temp.flush()
             images.append(temp.name)
-            
-            time.sleep(1.5)
+            time.sleep(2)
         except Exception as e:
             st.warning(f"⚠️ Scene {i+1} image failed: {e}")
             images.append(None)
-    
     return images
 
-# ============ MOTION EFFECTS (Make Images Feel Like Video) ============
+# ============ PROMPT PREVIEW ============
+
+def render_prompt_preview(scenes):
+    """
+    Render an interactive prompt preview panel where users can see
+    and edit the image prompts before generation.
+    """
+    st.markdown("---")
+    st.subheader("🔍 Prompt Preview & Edit")
+    st.caption("Review and customize the image prompts before AI generation. Keep prompts concise (under 250 chars) to avoid rate limits.")
+    
+    custom_prompts = []
+    
+    for i, scene in enumerate(scenes):
+        default_prompt = build_image_prompt(scene, "")
+        
+        with st.expander(f"🎬 Scene {i+1}: {scene['name']} ({scene['emotion']})", expanded=(i==0)):
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                # Editable text area for the prompt
+                edited = st.text_area(
+                    f"Image Prompt",
+                    value=default_prompt,
+                    key=f"prompt_edit_{i}",
+                    height=80,
+                    max_chars=250,
+                    help="Edit this prompt to control what the AI generates. Shorter = more reliable."
+                )
+                custom_prompts.append(edited)
+                
+                # Show character count with color warning
+                char_count = len(edited)
+                if char_count > 200:
+                    st.error(f"⚠️ {char_count}/250 chars — Very long! Risk of 429 errors.")
+                elif char_count > 150:
+                    st.warning(f"⚠️ {char_count}/250 chars — Getting long.")
+                else:
+                    st.success(f"✅ {char_count}/250 chars — Good length.")
+            
+            with col2:
+                st.markdown("**Scene Info**")
+                st.markdown(f"**Emotion:** `{scene['emotion']}`")
+                st.markdown(f"**Duration:** `{scene['duration']:.1f}s`")
+                if scene.get("voiceover"):
+                    st.markdown(f"**Voiceover:** \"{scene['voiceover'][:40]}...\"")
+    
+    # Global prompt stats
+    st.markdown("---")
+    total_chars = sum(len(p) for p in custom_prompts)
+    avg_chars = total_chars / max(len(custom_prompts), 1)
+    
+    cols = st.columns(3)
+    cols[0].metric("Total Prompts", len(custom_prompts))
+    cols[1].metric("Avg Length", f"{avg_chars:.0f} chars")
+    cols[2].metric("Est. Time", f"{len(custom_prompts) * 3}s")
+    
+    if avg_chars > 180:
+        st.error("⚠️ Your prompts are quite long on average. Consider shortening them to avoid Pollinations rate limits.")
+    elif avg_chars > 120:
+        st.warning("⚠️ Some prompts are getting long. Watch for 429 errors.")
+    else:
+        st.success("✅ Prompt lengths look good!")
+    
+    return custom_prompts
+
+# ============ MOTION EFFECTS ============
+
 def create_ken_burns_clip(img_path, duration, target_w, target_h, motion_type="zoom_in"):
     """
     Create a clip with Ken Burns motion effect to make still images feel alive.
@@ -189,7 +290,6 @@ def create_ken_burns_clip(img_path, duration, target_w, target_h, motion_type="z
     img_clip = ImageClip(img_path, duration=duration)
     base_scale = max(target_w / img_clip.w, target_h / img_clip.h)
     
-    # Motion parameters
     if motion_type == "zoom_in":
         start_scale = base_scale * 1.3
         end_scale = base_scale * 1.05
@@ -233,12 +333,10 @@ def create_ken_burns_clip(img_path, duration, target_w, target_h, motion_type="z
         current_y = start_y + (end_y - start_y) * progress
         
         temp_clip = img_clip.resized(current_scale)
-        
         crop_w = target_w
         crop_h = target_h
         center_x = current_x * temp_clip.w
         center_y = current_y * temp_clip.h
-        
         x1 = center_x - crop_w / 2
         y1 = center_y - crop_h / 2
         x1 = max(0, min(x1, temp_clip.w - crop_w))
@@ -277,6 +375,7 @@ def get_motion_for_scene(scene, index):
     return motions[index % len(motions)]
 
 # ============ AUDIO & CAPTIONS ============
+
 def generate_audio_sync(text, output_path):
     import sys
     cmd = [
@@ -294,12 +393,10 @@ def generate_audio_sync(text, output_path):
 def generate_scene_captions(scenes):
     """Generate captions from scene voiceovers with timing."""
     captions = []
-    
     for scene in scenes:
         voiceover = scene.get("voiceover", "")
         start = scene.get("start", 0)
         duration = scene.get("duration", 5)
-        
         if not voiceover:
             continue
         
@@ -326,10 +423,10 @@ def generate_scene_captions(scenes):
                 "end": c_end,
                 "scene_name": scene.get("name", "")
             })
-    
     return captions
 
 # ============ BACKGROUND MUSIC ============
+
 def get_background_music(emotion="neutral"):
     """Get background music matching the emotional tone."""
     emotion_queries = {
@@ -341,7 +438,6 @@ def get_background_music(emotion="neutral"):
         "exciting": "energetic upbeat electronic music",
         "neutral": "ambient background music"
     }
-    
     query = emotion_queries.get(emotion, "ambient background music")
     headers = {"Authorization": PEXELS_API_KEY}
     
@@ -374,6 +470,7 @@ def download_music(url, output_path):
         f.write(response.content)
 
 # ============ FONT ============
+
 def get_available_font():
     font_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -389,282 +486,10 @@ def get_available_font():
     return None
 
 # ============ UI ============
+
 st.set_page_config(page_title="AI Video Generator Pro", page_icon="🎬")
 st.title("🎬 AI Video Generator Pro")
 st.markdown("🧠 **Intelligent Cinematic Mode**: Paste your script with scene directions, and AI creates a movie!")
 
 st.markdown("""
 **Script Format Example:**
- """)
-script = st.text_area("📝 Paste your cinematic script:", height=250, 
-    placeholder='Write your script with SCENE headers, [visual directions], and Voiceover: "text"')
-ratio = st.selectbox("📐 Select Ratio:", list(RATIOS.keys()))
-
-st.markdown("---")
-
-image_source = st.radio(
-    "🖼️ Image Source:",
-    ["🤖 AI Generate Images from Script", "📤 Upload My Own Images"],
-    index=0
-)
-
-uploaded_files = []
-if image_source == "📤 Upload My Own Images":
-    uploaded_files = st.file_uploader(
-        "Upload one image per scene",
-        type=["jpg", "jpeg", "png"],
-        accept_multiple_files=True
-    )
-
-st.markdown("---")
-add_captions = st.checkbox("📝 Add Auto-Captions", value=True)
-add_music = st.checkbox("🎵 Add Emotional Background Music", value=True)
-music_volume = st.slider("Music Volume", 0.0, 0.3, 0.08) if add_music else 0.08
-
-st.markdown("---")
-st.markdown("**🎬 Motion Effects:**")
-motion_intensity = st.slider("Motion Intensity", 0.0, 1.0, 0.7, 
-    help="How much the images move (zoom/pan) to feel like video")
-
-if st.button("🚀 Generate Cinematic Video", type="primary"):
-    if not script.strip():
-        st.error("Please enter a script!")
-    elif image_source == "📤 Upload My Own Images" and not uploaded_files:
-        st.error("Please upload images for each scene!")
-    else:
-        temp_files = []
-        try:
-            # Step 1: Parse script
-            with st.spinner("🧠 Analyzing your cinematic script..."):
-                scenes, intro_text = parse_script(script)
-                st.write(f"**🎬 {len(scenes)} scenes detected:**")
-                for s in scenes:
-                    st.write(f"  • **{s['name']}** ({s['timing']}) — *{s['emotion']}* — \"{s['voiceover'][:50]}...\"")
-            
-            # Step 2: Generate full voiceover
-            full_voiceover = " ".join([s["voiceover"] for s in scenes if s["voiceover"]])
-            if not full_voiceover:
-                full_voiceover = script
-            
-            with st.spinner("🎙️ Generating AI voiceover..."):
-                audio_path = "voice.mp3"
-                generate_audio_sync(full_voiceover, audio_path)
-                temp_files.append(audio_path)
-            
-            # Step 3: Get audio duration
-            audio_clip = AudioFileClip(audio_path)
-            audio_duration = audio_clip.duration
-            
-            # Adjust scene durations based on actual audio
-            total_voice_duration = sum(len(s["voiceover"].split()) for s in scenes if s["voiceover"])
-            if total_voice_duration > 0:
-                for s in scenes:
-                    word_count = len(s["voiceover"].split())
-                    s["duration"] = (word_count / total_voice_duration) * audio_duration
-                    s["start"] = sum(scenes[j]["duration"] for j in range(scenes.index(s)))
-            
-            # Step 4: Generate captions
-            captions = []
-            if add_captions:
-                with st.spinner("📝 Creating scene captions..."):
-                    captions = generate_scene_captions(scenes)
-                    st.write(f"**📝 {len(captions)} caption segments created**")
-            
-            # Step 5: Get images
-            image_paths = []
-            
-            if image_source == "🤖 AI Generate Images from Script":
-                with st.spinner("🎨 AI is generating cinematic images..."):
-                    ai_images = generate_scene_images(scenes)
-                    valid_images = [img for img in ai_images if img is not None]
-                    if not valid_images:
-                        st.error("❌ Failed to generate images. Please try again or upload your own.")
-                        st.stop()
-                    image_paths = valid_images
-                    temp_files.extend(valid_images)
-                    st.write(f"**✅ {len(valid_images)} cinematic images generated!**")
-            else:
-                with st.spinner("🖼️ Processing your images..."):
-                    for i, img_file in enumerate(uploaded_files):
-                        temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{i}.jpg")
-                        temp.write(img_file.read())
-                        temp.flush()
-                        image_paths.append(temp.name)
-                        temp_files.append(temp.name)
-            
-            # Step 6: Background music matching emotion
-            music_clip = None
-            if add_music and scenes:
-                dominant_emotion = max(set(s["emotion"] for s in scenes), 
-                                      key=lambda e: sum(1 for s in scenes if s["emotion"] == e))
-                
-                with st.spinner(f"🎵 Finding {dominant_emotion} background music..."):
-                    music_url = get_background_music(dominant_emotion)
-                    if music_url:
-                        music_path = "bg_music.mp4"
-                        download_music(music_url, music_path)
-                        temp_files.append(music_path)
-                        music_clip = AudioFileClip(music_path)
-                        if music_clip.duration < audio_duration:
-                            loops = int(audio_duration / music_clip.duration) + 1
-                            music_clip = concatenate_audioclips([music_clip] * loops)
-                        music_clip = music_clip.subclipped(0, audio_duration)
-                        music_clip = music_clip.with_volume_scaled(music_volume)
-                    else:
-                        st.warning("⚠️ Could not fetch background music.")
-            
-            # Step 7: Create cinematic video with motion
-            with st.spinner("🎬 Assembling cinematic video with motion effects..."):
-                tw, th = RATIOS[ratio]
-                transition_duration = 0.5
-                
-                clips = []
-                for i, (img_path, scene) in enumerate(zip(image_paths, scenes)):
-                    motion_type = get_motion_for_scene(scene, i)
-                    
-                    scene_duration = scene.get("duration", audio_duration / len(image_paths))
-                    img_clip = create_ken_burns_clip(
-                        img_path, 
-                        scene_duration, 
-                        tw, th, 
-                        motion_type=motion_type
-                    )
-                    
-                    # Fade transitions
-                    effects = []
-                    if i > 0:
-                        effects.append(CrossFadeIn(transition_duration))
-                    if i < len(image_paths) - 1:
-                        effects.append(CrossFadeOut(transition_duration))
-                    if effects:
-                        img_clip = img_clip.with_effects(effects)
-                    
-                    clips.append(img_clip)
-                
-                # Concatenate all scenes
-                final = concatenate_videoclips(clips, method="compose")
-                
-                # Add scene title cards and captions
-                if add_captions and captions:
-                    overlay_clips = []
-                    font_path = get_available_font()
-                    
-                    # Scene title cards
-                    for i, scene in enumerate(scenes):
-                        if scene.get("name") and scene["name"] != "Scene":
-                            title_text = f"{scene['name'].upper()}"
-                            title_kwargs = {
-                                "text": title_text,
-                                "font_size": 40,
-                                "color": "white",
-                                "stroke_color": "black",
-                                "stroke_width": 2,
-                                "size": (tw - 100, None),
-                                "method": "caption",
-                                "text_align": "center"
-                            }
-                            if font_path:
-                                title_kwargs["font"] = font_path
-                            
-                            title_clip = TextClip(**title_kwargs)
-                            title_clip = title_clip.with_duration(1.5)
-                            title_clip = title_clip.with_start(scene["start"])
-                            title_clip = title_clip.with_position(("center", th * 0.15))
-                            
-                            title_bar = ColorClip(size=(tw, title_clip.h + 20), color=(0, 0, 0))
-                            title_bar = title_bar.with_duration(1.5)
-                            title_bar = title_bar.with_start(scene["start"])
-                            title_bar = title_bar.with_position(("center", th * 0.15 - 10))
-                            title_bar = title_bar.with_opacity(0.5)
-                            
-                            overlay_clips.extend([title_bar, title_clip])
-                    
-                    # Captions
-                    for cap in captions:
-                        txt = cap["text"]
-                        start = cap["start"]
-                        end = cap["end"]
-                        duration = end - start
-                        
-                        txt_kwargs = {
-                            "text": txt,
-                            "font_size": 55,
-                            "color": "white",
-                            "stroke_color": "black",
-                            "stroke_width": 3,
-                            "size": (tw - 120, None),
-                            "method": "caption",
-                            "text_align": "center"
-                        }
-                        if font_path:
-                            txt_kwargs["font"] = font_path
-                        
-                        txt_clip = TextClip(**txt_kwargs)
-                        txt_clip = txt_clip.with_duration(duration)
-                        txt_clip = txt_clip.with_start(start)
-                        txt_clip = txt_clip.with_position(("center", th * 0.78))
-                        
-                        cap_bar = ColorClip(size=(tw, txt_clip.h + 25), color=(0, 0, 0))
-                        cap_bar = cap_bar.with_duration(duration)
-                        cap_bar = cap_bar.with_start(start)
-                        cap_bar = cap_bar.with_position(("center", th * 0.78 - 12))
-                        cap_bar = cap_bar.with_opacity(0.65)
-                        
-                        overlay_clips.extend([cap_bar, txt_clip])
-                    
-                    final = CompositeVideoClip([final] + overlay_clips)
-                
-                # Combine audio
-                if music_clip:
-                    from moviepy import CompositeAudioClip
-                    combined_audio = CompositeAudioClip([audio_clip, music_clip])
-                    final = final.with_audio(combined_audio)
-                else:
-                    final = final.with_audio(audio_clip)
-                
-                # Write final video
-                output_path = "output.mp4"
-                final.write_videofile(
-                    output_path,
-                    fps=30,
-                    codec="libx264",
-                    audio_codec="aac",
-                    threads=4,
-                    preset="medium"
-                )
-                temp_files.append(output_path)
-                
-                # Cleanup
-                audio_clip.close()
-                if music_clip:
-                    music_clip.close()
-                for c in clips:
-                    c.close()
-                final.close()
-            
-            st.success("✅ Your cinematic video is ready! 🎬")
-            
-            # Read video as bytes for Streamlit display
-            with open(output_path, "rb") as video_file:
-                video_bytes = video_file.read()
-            st.video(video_bytes)
-            
-            st.download_button(
-                "⬇️ Download Cinematic Video",
-                data=video_bytes,
-                file_name="cinematic_ai_video.mp4",
-                mime="video/mp4"
-            )
-
-                
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
-            st.exception(e)
-        finally:
-            for f in temp_files:
-                try:
-                    if os.path.exists(f):
-                        os.remove(f)
-                except:
-                    pass
-        
