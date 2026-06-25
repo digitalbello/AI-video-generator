@@ -395,4 +395,272 @@ st.markdown("🧠 **Intelligent Cinematic Mode**: Paste your script with scene d
 
 st.markdown("""
 **Script Format Example:**
+ """)
+script = st.text_area("📝 Paste your cinematic script:", height=250, 
+    placeholder='Write your script with SCENE headers, [visual directions], and Voiceover: "text"')
+ratio = st.selectbox("📐 Select Ratio:", list(RATIOS.keys()))
+
+st.markdown("---")
+
+image_source = st.radio(
+    "🖼️ Image Source:",
+    ["🤖 AI Generate Images from Script", "📤 Upload My Own Images"],
+    index=0
+)
+
+uploaded_files = []
+if image_source == "📤 Upload My Own Images":
+    uploaded_files = st.file_uploader(
+        "Upload one image per scene",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True
+    )
+
+st.markdown("---")
+add_captions = st.checkbox("📝 Add Auto-Captions", value=True)
+add_music = st.checkbox("🎵 Add Emotional Background Music", value=True)
+music_volume = st.slider("Music Volume", 0.0, 0.3, 0.08) if add_music else 0.08
+
+st.markdown("---")
+st.markdown("**🎬 Motion Effects:**")
+motion_intensity = st.slider("Motion Intensity", 0.0, 1.0, 0.7, 
+    help="How much the images move (zoom/pan) to feel like video")
+
+if st.button("🚀 Generate Cinematic Video", type="primary"):
+    if not script.strip():
+        st.error("Please enter a script!")
+    elif image_source == "📤 Upload My Own Images" and not uploaded_files:
+        st.error("Please upload images for each scene!")
+    else:
+        temp_files = []
+        try:
+            # Step 1: Parse script
+            with st.spinner("🧠 Analyzing your cinematic script..."):
+                scenes, intro_text = parse_script(script)
+                st.write(f"**🎬 {len(scenes)} scenes detected:**")
+                for s in scenes:
+                    st.write(f"  • **{s['name']}** ({s['timing']}) — *{s['emotion']}* — \"{s['voiceover'][:50]}...\"")
+            
+            # Step 2: Generate full voiceover
+            full_voiceover = " ".join([s["voiceover"] for s in scenes if s["voiceover"]])
+            if not full_voiceover:
+                full_voiceover = script
+            
+            with st.spinner("🎙️ Generating AI voiceover..."):
+                audio_path = "voice.mp3"
+                generate_audio_sync(full_voiceover, audio_path)
+                temp_files.append(audio_path)
+            
+            # Step 3: Get audio duration
+            audio_clip = AudioFileClip(audio_path)
+            audio_duration = audio_clip.duration
+            
+            # Adjust scene durations based on actual audio
+            total_voice_duration = sum(len(s["voiceover"].split()) for s in scenes if s["voiceover"])
+            if total_voice_duration > 0:
+                for s in scenes:
+                    word_count = len(s["voiceover"].split())
+                    s["duration"] = (word_count / total_voice_duration) * audio_duration
+                    s["start"] = sum(scenes[j]["duration"] for j in range(scenes.index(s)))
+            
+            # Step 4: Generate captions
+            captions = []
+            if add_captions:
+                with st.spinner("📝 Creating scene captions..."):
+                    captions = generate_scene_captions(scenes)
+                    st.write(f"**📝 {len(captions)} caption segments created**")
+            
+            # Step 5: Get images
+            image_paths = []
+            
+            if image_source == "🤖 AI Generate Images from Script":
+                with st.spinner("🎨 AI is generating cinematic images..."):
+                    ai_images = generate_scene_images(scenes)
+                    valid_images = [img for img in ai_images if img is not None]
+                    if not valid_images:
+                        st.error("❌ Failed to generate images. Please try again or upload your own.")
+                        st.stop()
+                    image_paths = valid_images
+                    temp_files.extend(valid_images)
+                    st.write(f"**✅ {len(valid_images)} cinematic images generated!**")
+            else:
+                with st.spinner("🖼️ Processing your images..."):
+                    for i, img_file in enumerate(uploaded_files):
+                        temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{i}.jpg")
+                        temp.write(img_file.read())
+                        temp.flush()
+                        image_paths.append(temp.name)
+                        temp_files.append(temp.name)
+            
+            # Step 6: Background music matching emotion
+            music_clip = None
+            if add_music and scenes:
+                dominant_emotion = max(set(s["emotion"] for s in scenes), 
+                                      key=lambda e: sum(1 for s in scenes if s["emotion"] == e))
+                
+                with st.spinner(f"🎵 Finding {dominant_emotion} background music..."):
+                    music_url = get_background_music(dominant_emotion)
+                    if music_url:
+                        music_path = "bg_music.mp4"
+                        download_music(music_url, music_path)
+                        temp_files.append(music_path)
+                        music_clip = AudioFileClip(music_path)
+                        if music_clip.duration < audio_duration:
+                            loops = int(audio_duration / music_clip.duration) + 1
+                            music_clip = concatenate_audioclips([music_clip] * loops)
+                        music_clip = music_clip.subclipped(0, audio_duration)
+                        music_clip = music_clip.with_volume_scaled(music_volume)
+                    else:
+                        st.warning("⚠️ Could not fetch background music.")
+            
+            # Step 7: Create cinematic video with motion
+            with st.spinner("🎬 Assembling cinematic video with motion effects..."):
+                tw, th = RATIOS[ratio]
+                transition_duration = 0.5
+                
+                clips = []
+                for i, (img_path, scene) in enumerate(zip(image_paths, scenes)):
+                    motion_type = get_motion_for_scene(scene, i)
+                    
+                    scene_duration = scene.get("duration", audio_duration / len(image_paths))
+                    img_clip = create_ken_burns_clip(
+                        img_path, 
+                        scene_duration, 
+                        tw, th, 
+                        motion_type=motion_type
+                    )
+                    
+                    # Fade transitions
+                    effects = []
+                    if i > 0:
+                        effects.append(CrossFadeIn(transition_duration))
+                    if i < len(image_paths) - 1:
+                        effects.append(CrossFadeOut(transition_duration))
+                    if effects:
+                        img_clip = img_clip.with_effects(effects)
+                    
+                    clips.append(img_clip)
+                
+                # Concatenate all scenes
+                final = concatenate_videoclips(clips, method="compose")
+                
+                # Add scene title cards and captions
+                if add_captions and captions:
+                    overlay_clips = []
+                    font_path = get_available_font()
+                    
+                    # Scene title cards
+                    for i, scene in enumerate(scenes):
+                        if scene.get("name") and scene["name"] != "Scene":
+                            title_text = f"{scene['name'].upper()}"
+                            title_kwargs = {
+                                "text": title_text,
+                                "font_size": 40,
+                                "color": "white",
+                                "stroke_color": "black",
+                                "stroke_width": 2,
+                                "size": (tw - 100, None),
+                                "method": "caption",
+                                "text_align": "center"
+                            }
+                            if font_path:
+                                title_kwargs["font"] = font_path
+                            
+                            title_clip = TextClip(**title_kwargs)
+                            title_clip = title_clip.with_duration(1.5)
+                            title_clip = title_clip.with_start(scene["start"])
+                            title_clip = title_clip.with_position(("center", th * 0.15))
+                            
+                            title_bar = ColorClip(size=(tw, title_clip.h + 20), color=(0, 0, 0))
+                            title_bar = title_bar.with_duration(1.5)
+                            title_bar = title_bar.with_start(scene["start"])
+                            title_bar = title_bar.with_position(("center", th * 0.15 - 10))
+                            title_bar = title_bar.with_opacity(0.5)
+                            
+                            overlay_clips.extend([title_bar, title_clip])
+                    
+                    # Captions
+                    for cap in captions:
+                        txt = cap["text"]
+                        start = cap["start"]
+                        end = cap["end"]
+                        duration = end - start
+                        
+                        txt_kwargs = {
+                            "text": txt,
+                            "font_size": 55,
+                            "color": "white",
+                            "stroke_color": "black",
+                            "stroke_width": 3,
+                            "size": (tw - 120, None),
+                            "method": "caption",
+                            "text_align": "center"
+                        }
+                        if font_path:
+                            txt_kwargs["font"] = font_path
+                        
+                        txt_clip = TextClip(**txt_kwargs)
+                        txt_clip = txt_clip.with_duration(duration)
+                        txt_clip = txt_clip.with_start(start)
+                        txt_clip = txt_clip.with_position(("center", th * 0.78))
+                        
+                        cap_bar = ColorClip(size=(tw, txt_clip.h + 25), color=(0, 0, 0))
+                        cap_bar = cap_bar.with_duration(duration)
+                        cap_bar = cap_bar.with_start(start)
+                        cap_bar = cap_bar.with_position(("center", th * 0.78 - 12))
+                        cap_bar = cap_bar.with_opacity(0.65)
+                        
+                        overlay_clips.extend([cap_bar, txt_clip])
+                    
+                    final = CompositeVideoClip([final] + overlay_clips)
+                
+                # Combine audio
+                if music_clip:
+                    from moviepy import CompositeAudioClip
+                    combined_audio = CompositeAudioClip([audio_clip, music_clip])
+                    final = final.with_audio(combined_audio)
+                else:
+                    final = final.with_audio(audio_clip)
+                
+                # Write final video
+                output_path = "output.mp4"
+                final.write_videofile(
+                    output_path,
+                    fps=30,
+                    codec="libx264",
+                    audio_codec="aac",
+                    threads=4,
+                    preset="medium"
+                )
+                temp_files.append(output_path)
+                
+                # Cleanup
+                audio_clip.close()
+                if music_clip:
+                    music_clip.close()
+                for c in clips:
+                    c.close()
+                final.close()
+            
+            st.success("✅ Your cinematic video is ready! 🎬")
+            st.video(output_path)
+            
+            with open(output_path, "rb") as f:
+                st.download_button(
+                    "⬇️ Download Cinematic Video",
+                    data=f,
+                    file_name="cinematic_ai_video.mp4",
+                    mime="video/mp4"
+                )
+                
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+            st.exception(e)
+        finally:
+            for f in temp_files:
+                try:
+                    if os.path.exists(f):
+                        os.remove(f)
+                except:
+                    pass
         
