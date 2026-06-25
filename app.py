@@ -5,6 +5,7 @@ import shutil
 import random
 import json
 import re
+import time
 import streamlit as st
 import subprocess
 from groq import Groq
@@ -32,6 +33,48 @@ RATIOS = {
     "1:1 (Instagram)": (1080, 1080)
 }
 
+# --- AI Image Generation via Pollinations.ai (FREE, no API key needed) ---
+def generate_ai_image(prompt, width=1024, height=1024, seed=None):
+    """Generate an image using Pollinations.ai free API."""
+    if seed is None:
+        seed = random.randint(1, 999999)
+    
+    encoded_prompt = requests.utils.quote(prompt)
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width={width}&height={height}&seed={seed}&nologo=true"
+    
+    response = requests.get(url, timeout=60)
+    response.raise_for_status()
+    
+    return response.content
+
+def generate_ai_images_from_script(script, keywords, num_images=3):
+    """Generate AI images based on script and keywords."""
+    images = []
+    
+    # Create scene descriptions from keywords
+    scenes = []
+    for i, kw in enumerate(keywords[:num_images]):
+        scene = f"Cinematic scene: {kw}, based on script about {script[:50]}..., professional photography, high quality, 4k, detailed"
+        scenes.append(scene)
+    
+    # Generate images for each scene
+    for i, scene in enumerate(scenes):
+        try:
+            st.write(f"🎨 Generating image {i+1}/{len(scenes)}: {keywords[i] if i < len(keywords) else 'scene'}...")
+            img_data = generate_ai_image(scene, width=1024, height=1024, seed=random.randint(1, 999999))
+            
+            temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_ai_{i}.png")
+            temp.write(img_data)
+            temp.flush()
+            images.append(temp.name)
+            
+            time.sleep(1)  # Avoid rate limiting
+        except Exception as e:
+            st.warning(f"⚠️ Failed to generate image {i+1}: {e}")
+            continue
+    
+    return images
+
 # --- Keyword Extraction ---
 def extract_keywords(script):
     client = Groq(api_key=GROQ_API_KEY)
@@ -53,9 +96,8 @@ def extract_keywords(script):
     data = json.loads(raw)
     return list(data.values())
 
-# --- Auto-Captions: Split script into timed segments ---
+# --- Auto-Captions ---
 def generate_captions(script, audio_duration):
-    """Split script into caption segments with timing."""
     text = script.strip()
     sentences = re.split(r'(?<=[.!?])\s+', text)
     sentences = [s.strip() for s in sentences if s.strip()]
@@ -70,7 +112,6 @@ def generate_captions(script, audio_duration):
         start = i * time_per_sentence
         end = (i + 1) * time_per_sentence
         
-        # Break long sentences into chunks of ~40 chars
         words = sentence.split()
         chunks = []
         current_chunk = ""
@@ -84,7 +125,6 @@ def generate_captions(script, audio_duration):
         if current_chunk:
             chunks.append(current_chunk)
         
-        # Distribute chunks within sentence time
         chunk_duration = time_per_sentence / max(len(chunks), 1)
         for j, chunk in enumerate(chunks):
             c_start = start + (j * chunk_duration)
@@ -97,7 +137,7 @@ def generate_captions(script, audio_duration):
     
     return captions
 
-# --- Audio Generation (edge-tts CLI) ---
+# --- Audio Generation ---
 def generate_audio_sync(text, output_path):
     import sys
     cmd = [
@@ -112,7 +152,7 @@ def generate_audio_sync(text, output_path):
     if not os.path.exists(output_path):
         raise RuntimeError("Audio file was not created.")
 
-# --- Background Music from Pexels ---
+# --- Background Music ---
 def get_background_music():
     headers = {"Authorization": PEXELS_API_KEY}
     try:
@@ -143,9 +183,8 @@ def download_music(url, output_path):
     with open(output_path, "wb") as f:
         f.write(response.content)
 
-# --- Find available font on Linux ---
+# --- Find available font ---
 def get_available_font():
-    """Find a font file that exists on the current system."""
     font_paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
@@ -162,18 +201,28 @@ def get_available_font():
 # --- UI ---
 st.set_page_config(page_title="AI Video Generator", page_icon="🎬")
 st.title("🎬 AI Video Generator")
-st.markdown("Create stunning videos from your images with voiceover, captions & music!")
+st.markdown("🧠 **Intelligent Mode**: Just describe your video, and AI generates everything!")
 
-script = st.text_area("📝 Paste your script here:", height=150)
+script = st.text_area("📝 Describe your video (script):", height=150, 
+    placeholder="Example: A motivational video about never giving up. Show a person climbing a mountain at sunrise...")
 ratio = st.selectbox("📐 Select Ratio:", list(RATIOS.keys()))
 
 st.markdown("---")
-st.subheader("📤 Upload Your Images")
-uploaded_files = st.file_uploader(
-    "Upload images (3-5 recommended)",
-    type=["jpg", "jpeg", "png"],
-    accept_multiple_files=True
+
+# Image source selection
+image_source = st.radio(
+    "🖼️ Image Source:",
+    ["🤖 AI Generate Images from Script", "📤 Upload My Own Images"],
+    index=0
 )
+
+uploaded_files = []
+if image_source == "📤 Upload My Own Images":
+    uploaded_files = st.file_uploader(
+        "Upload images (3-5 recommended)",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True
+    )
 
 st.markdown("---")
 add_captions = st.checkbox("📝 Add Auto-Captions", value=True)
@@ -183,63 +232,73 @@ music_volume = st.slider("Music Volume", 0.0, 0.3, 0.08) if add_music else 0.08
 if st.button("🚀 Generate Video", type="primary"):
     if not script.strip():
         st.error("Please enter a script!")
-    elif not uploaded_files:
+    elif image_source == "📤 Upload My Own Images" and not uploaded_files:
         st.error("Please upload at least one image!")
     else:
         temp_files = []
         try:
             # Step 1: Extract keywords
-            with st.spinner("🧠 AI is analyzing script..."):
+            with st.spinner("🧠 AI is analyzing your script..."):
                 keywords = extract_keywords(script)
-                st.write(f"**Visuals:** {', '.join(keywords)}")
+                st.write(f"**🎨 Visual Themes:** {', '.join(keywords)}")
             
             # Step 2: Generate voice
-            with st.spinner("🎙️ Generating voice..."):
+            with st.spinner("🎙️ Generating AI voiceover..."):
                 audio_path = "voice.mp3"
                 generate_audio_sync(script, audio_path)
                 temp_files.append(audio_path)
             
-            # Step 3: Get audio duration and generate captions
+            # Step 3: Get audio duration and captions
             audio_clip = AudioFileClip(audio_path)
             audio_duration = audio_clip.duration
             
             captions = []
             if add_captions:
-                with st.spinner("📝 Generating captions..."):
+                with st.spinner("📝 Creating captions..."):
                     captions = generate_captions(script, audio_duration)
-                    st.write(f"**Generated {len(captions)} caption segments**")
+                    st.write(f"**📝 {len(captions)} caption segments created**")
             
-            # Step 4: Process uploaded images
-            with st.spinner("🖼️ Processing images..."):
-                image_paths = []
-                for i, img_file in enumerate(uploaded_files):
-                    temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{i}.jpg")
-                    temp.write(img_file.read())
-                    temp.flush()
-                    image_paths.append(temp.name)
-                    temp_files.append(temp.name)
+            # Step 4: Get images (AI-generated OR uploaded)
+            image_paths = []
+            
+            if image_source == "🤖 AI Generate Images from Script":
+                with st.spinner("🎨 AI is generating images from your script..."):
+                    ai_images = generate_ai_images_from_script(script, keywords, num_images=3)
+                    if not ai_images:
+                        st.error("❌ Failed to generate images. Please try again or upload your own.")
+                        st.stop()
+                    image_paths = ai_images
+                    temp_files.extend(ai_images)
+                    st.write(f"**✅ {len(ai_images)} AI images generated!**")
+            else:
+                with st.spinner("🖼️ Processing your images..."):
+                    for i, img_file in enumerate(uploaded_files):
+                        temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{i}.jpg")
+                        temp.write(img_file.read())
+                        temp.flush()
+                        image_paths.append(temp.name)
+                        temp_files.append(temp.name)
             
             # Step 5: Background music
             music_clip = None
             if add_music:
-                with st.spinner("🎵 Fetching background music..."):
+                with st.spinner("🎵 Adding background music..."):
                     music_url = get_background_music()
                     if music_url:
                         music_path = "bg_music.mp4"
                         download_music(music_url, music_path)
                         temp_files.append(music_path)
                         music_clip = AudioFileClip(music_path)
-                        # Loop if shorter than audio
                         if music_clip.duration < audio_duration:
                             loops = int(audio_duration / music_clip.duration) + 1
                             music_clip = concatenate_audioclips([music_clip] * loops)
                         music_clip = music_clip.subclipped(0, audio_duration)
                         music_clip = music_clip.with_volume_scaled(music_volume)
                     else:
-                        st.warning("⚠️ Could not fetch background music. Continuing without it.")
+                        st.warning("⚠️ Could not fetch background music.")
             
             # Step 6: Create video
-            with st.spinner("🎬 Creating video..."):
+            with st.spinner("🎬 Assembling your video..."):
                 tw, th = RATIOS[ratio]
                 num_images = len(image_paths)
                 time_per_image = audio_duration / num_images
@@ -283,7 +342,6 @@ if st.button("🚀 Generate Video", type="primary"):
                         end = cap["end"]
                         duration = end - start
                         
-                        # Build TextClip kwargs - font is optional
                         txt_kwargs = {
                             "text": txt,
                             "font_size": 60,
@@ -294,7 +352,6 @@ if st.button("🚀 Generate Video", type="primary"):
                             "method": "caption",
                             "text_align": "center"
                         }
-                        # Only add font if we found a valid font file
                         if font_path:
                             txt_kwargs["font"] = font_path
                         
@@ -303,7 +360,7 @@ if st.button("🚀 Generate Video", type="primary"):
                         txt_clip = txt_clip.with_start(start)
                         txt_clip = txt_clip.with_position(("center", th * 0.75))
                         
-                        # Black background bar
+                        # Background bar
                         bar = ColorClip(
                             size=(tw, txt_clip.h + 30),
                             color=(0, 0, 0)
@@ -345,7 +402,7 @@ if st.button("🚀 Generate Video", type="primary"):
                     c.close()
                 final.close()
             
-            st.success("✅ Done! Your video is ready.")
+            st.success("✅ Your AI video is ready!")
             st.video(output_path)
             
             with open(output_path, "rb") as f:
@@ -366,4 +423,4 @@ if st.button("🚀 Generate Video", type="primary"):
                         os.remove(f)
                 except:
                     pass
-
+                                   
